@@ -1,13 +1,63 @@
 name: Deploy
+
 on:
+  schedule:
+    - cron: "17 16 * * *"
+  workflow_dispatch:
   push:
     branches: [core-only]
+    paths-ignore:
+      - "README.md"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: deploy-worker
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPO: byJoey/cfnew
+  UPSTREAM_BRANCH: core-only
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    env:
+      KV_ID: ${{ secrets.KV_NAMESPACE_ID }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: core-only
+          fetch-depth: 0
+
+      - name: Sync from upstream
+        id: sync
+        run: |
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git"
+          git fetch upstream "${UPSTREAM_BRANCH}"
+          git checkout FETCH_HEAD -- .
+          git reset -q -- wrangler.jsonc .github
+          git checkout -- wrangler.jsonc .github
+          git clean -fdq -- .github
+          if git diff --cached --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit -m "chore: sync from ${UPSTREAM_REPO}@${UPSTREAM_BRANCH}"
+            git push origin HEAD:core-only
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Pin KV namespace id
+        if: env.KV_ID != ''
+        run: |
+          jq --arg id "$KV_ID" '.kv_namespaces[0].id = $id' wrangler.jsonc > w.tmp
+          mv w.tmp wrangler.jsonc
+
       - uses: cloudflare/wrangler-action@v3
+        if: github.event_name != 'schedule' || steps.sync.outputs.changed == 'true'
         with:
           wranglerVersion: "4"
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
